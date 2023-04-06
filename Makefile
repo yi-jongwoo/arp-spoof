@@ -14,4 +14,4 @@ proto_structures.o : proto_structures.cpp proto_structures.h
 
 clean :
 	rm -f *.o
-	rm -f send-arp
+	rm -f arp-spoof
