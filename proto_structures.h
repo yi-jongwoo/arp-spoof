@@ -6,6 +6,10 @@
 #include <cstring>
 #include <netinet/in.h>
 
+#define TOKEN_PASTE(x, y) x##y
+#define CAT(x,y) TOKEN_PASTE(x,y)
+#define ignore_bytes(n) uint8_t CAT(nevermind,__LINE__)[n];
+
 union __attribute__((packed)) ipv4_addr{
 	static constexpr uint16_t ethtype=0x0800;
 	static constexpr int siz=4;
@@ -50,4 +54,13 @@ struct __attribute__((packed)) arp_eth_ipv4:public ethernet_packet{
 	arp_eth_ipv4();
 	arp_eth_ipv4(const mac_addr& src,const ipv4_addr& sip,const ipv4_addr& tip); // request
 	arp_eth_ipv4(const mac_addr& src,const mac_addr& dst,const ipv4_addr& sip,const ipv4_addr& tip); // reply
+	bool is_valid();
+};
+struct __attribute__((packed)) ipv4_eth:public ethernet_packet{
+	ignore_bytes(2);
+	uint16_t len;
+	ignore_bytes(8);
+	ipv4_addr sip;
+	ipv4_addr tip;
+	bool is_valid();
 };

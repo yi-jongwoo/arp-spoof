@@ -49,7 +49,7 @@ mac_addr::operator std::string() const{
 	for(int i=0;i<siz;i++){
 		if(i)ss<<'-';
 		int tmp=addr[i];
-		ss<<tmp;
+		ss<<tmp/16<<tmp%16;
 	}
 	return ss.str();
 }
@@ -79,4 +79,9 @@ arp_eth_ipv4::arp_eth_ipv4(const mac_addr& src,const mac_addr& dst,const ipv4_ad
 	l3type=htons(0x0800);
 	arptype=htons(0x0002);
 }
-
+bool arp_eth_ipv4::is_valid(){
+	return ethtype==htons(0x0806);
+}
+bool ipv4_eth::is_valid(){
+	return ethtype==htons(0x0800);
+}

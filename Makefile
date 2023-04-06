@@ -1,10 +1,10 @@
-all : send-arp
+all : arp-spoof
 
-send-arp : main.o proto_structures.o local_address.o
-	g++ main.o proto_structures.o local_address.o -lpcap -o send-arp
+arp-spoof : main.o proto_structures.o local_address.o
+	g++ main.o proto_structures.o local_address.o -lpcap -o arp-spoof
 
 main.o : main.cpp proto_structures.h local_address.h
-	g++ -c main.cpp -o main.o
+	g++ -c main.cpp -o main.o -std=c++17
 
 local_address.o : local_address.cpp local_address.h
 	g++ -c local_address.cpp -o local_address.o
