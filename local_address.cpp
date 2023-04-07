@@ -1,4 +1,5 @@
 #include "local_address.h"
+#include <iostream>
 mac_addr get_mac_addr(const char *dev){
 	std::ifstream fs(std::string("/sys/class/net/")+dev+"/address");
 	if(!fs.is_open()){
@@ -15,4 +16,15 @@ ipv4_addr get_ipv4_addr(const char *dev){
 	strncpy(ifr.ifr_name,dev,IFNAMSIZ-1);
 	ioctl(fd,SIOCGIFADDR,&ifr);
 	return ipv4_addr(inet_ntoa(((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr));
+}
+ipv4_addr get_gateway_addr(const char *dev){
+	std::string x("route -n | grep ");
+	x+=std::string(dev);
+	x+=std::string(" > tmp.txt");
+	system(x.c_str());
+	std::ifstream fs("tmp.txt");
+	fs>>x;fs>>x;
+	ipv4_addr res(x);
+	system("rm tmp.txt");
+	return res;
 }

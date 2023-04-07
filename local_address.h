@@ -7,6 +7,8 @@
 #include <netinet/in.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+#include <stdlib.h>
 #include "proto_structures.h"
 mac_addr get_mac_addr(const char *dev);
 ipv4_addr get_ipv4_addr(const char *dev);
+ipv4_addr get_gateway_addr(const char *dev);
