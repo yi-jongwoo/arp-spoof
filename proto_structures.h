@@ -29,6 +29,7 @@ struct __attribute__((packed)) mac_addr{
 	mac_addr(const std::string& x);
 	mac_addr(const char *x);
 	operator std::string() const;
+	bool is_broadcast() const;
 };
 
 struct __attribute__((packed)) ethernet_packet{
@@ -54,7 +55,7 @@ struct __attribute__((packed)) arp_eth_ipv4:public ethernet_packet{
 	arp_eth_ipv4();
 	arp_eth_ipv4(const mac_addr& src,const ipv4_addr& sip,const ipv4_addr& tip); // request
 	arp_eth_ipv4(const mac_addr& src,const mac_addr& dst,const ipv4_addr& sip,const ipv4_addr& tip); // reply
-	bool is_valid();
+	bool is_valid() const;
 };
 struct __attribute__((packed)) ipv4_eth:public ethernet_packet{
 	ignore_bytes(2);
@@ -62,5 +63,5 @@ struct __attribute__((packed)) ipv4_eth:public ethernet_packet{
 	ignore_bytes(8);
 	ipv4_addr sip;
 	ipv4_addr tip;
-	bool is_valid();
+	bool is_valid() const;
 };

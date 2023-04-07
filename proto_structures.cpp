@@ -53,6 +53,12 @@ mac_addr::operator std::string() const{
 	}
 	return ss.str();
 }
+bool mac_addr::is_broadcast() const{
+	uint8_t res=0xff;
+	for(int i=0;i<siz;i++)
+		res&=addr[i];
+	return !~res;
+}
 
 ethernet_packet::ethernet_packet(const mac_addr& src):src(src){
 	memset(&dst,-1,sizeof dst);
@@ -79,9 +85,9 @@ arp_eth_ipv4::arp_eth_ipv4(const mac_addr& src,const mac_addr& dst,const ipv4_ad
 	l3type=htons(0x0800);
 	arptype=htons(0x0002);
 }
-bool arp_eth_ipv4::is_valid(){
+bool arp_eth_ipv4::is_valid() const{
 	return ethtype==htons(0x0806);
 }
-bool ipv4_eth::is_valid(){
+bool ipv4_eth::is_valid() const{
 	return ethtype==htons(0x0800);
 }
