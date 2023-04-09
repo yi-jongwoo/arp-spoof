@@ -203,6 +203,8 @@ int main(int c,char **v){
 	my_ip=get_ipv4_addr(v[1]);
 	real_gateway=get_gateway_addr(v[1]);
 	std::cout<<"gateway : "<<std::string(real_gateway)<<std::endl;
+	if(!real_gateway.word)
+		return 0;
 	
 	std::vector<std::pair<ipv4_addr,ipv4_addr>> stpairs;
 	for(int i=2;i<c;i+=2){
